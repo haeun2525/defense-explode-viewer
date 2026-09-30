@@ -1,0 +1,10 @@
+# 렌더 결과물 · .blend · 검사 캡처 (다시 만들 수 있다)
+out/
+# IMU 실험 버전 보관 (전술 수신호에서 재사용할 참고용)
+archive/
+# 뷰어에서 뺀 NU40 보드 모델
+web/models/nu40.js
+products/nu40.py
+__pycache__/
+.DS_Store
+.vercel

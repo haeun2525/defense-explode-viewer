@@ -1,0 +1,1318 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>분해 뷰어</title>
+<!--
+  손 제스처 분해 뷰어. file:// 로 바로 열린다 (서버 불필요, 인터넷은 필요 — three.js·MediaPipe 를 CDN 에서 받음).
+  손 하나: 움직이면 제품이 따라 돌고, 펴면 분해(오므려도 유지) / 주먹을 0.5초 쥐면 조립.  검지만 펴면 커서 — 부품에 머물면 그 부품만 본다.
+  손 둘: 벌리면 확대, 모으면 축소.  주먹을 좌우로 흔들면(3번 꺾기) 작동 보기 켜기/끄기.
+  키: 1~5 제품, ←/→ 이전·다음, L 라벨, C 카메라 미리보기, Space 자동 시연, +/−/0 확대, Esc 전체로.
+  마우스: 드래그 회전, 휠 분해, 부품 클릭 = 부품 보기, 빈 곳 클릭 = 전체로.  ?debug 손 수치 표시.
+  모델은 models/*.js (tools/export_web.py 가 .blend 에서 만든다).
+-->
+<style>
+  :root { --fg: #E8EAEE; --dim: #9AA0A8; --accent: #C8D66A; --panel: rgba(18, 20, 24, .62); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #26282C url(bg.png) center / cover no-repeat;
+    color: var(--fg); font-family: -apple-system, "Apple SD Gothic Neo", "Pretendard", sans-serif; }
+  canvas#gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #title { position: fixed; left: 32px; top: 26px; pointer-events: none; }
+  #title .code { font: 600 13px/1 ui-monospace, Menlo, monospace; letter-spacing: .18em; color: var(--accent); }
+  #title .name { font-size: 30px; font-weight: 700; margin-top: 8px; letter-spacing: -.01em; }
+  #title .note { font-size: 12px; color: var(--dim); margin-top: 6px; letter-spacing: .01em; }
+  #gauge { position: fixed; left: 32px; bottom: 30px; width: 240px; pointer-events: none; }
+  #gauge .lab { font-size: 12px; color: var(--dim); letter-spacing: .12em; display: flex; justify-content: space-between; }
+  #gauge .bar { height: 4px; background: rgba(255,255,255,.14); margin-top: 8px; border-radius: 2px; overflow: hidden; }
+  #gauge .fill { height: 100%; width: 0; background: var(--accent); }
+  #cam { position: fixed; right: 24px; bottom: 24px; width: 240px; aspect-ratio: 4 / 3; border-radius: 10px;
+    overflow: hidden; background: #000; border: 1px solid rgba(255,255,255,.15); }
+  #cam video, #cam canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  #cam.off { display: none; }
+  #status { position: fixed; left: 50%; top: 22px; transform: translateX(-50%); background: var(--panel);
+    padding: 8px 14px; border-radius: 999px; font-size: 13px; color: var(--dim); transition: opacity .6s; pointer-events: none; }
+  #labels { position: fixed; inset: 0; pointer-events: none; }
+  .tag { position: absolute; transform: translate(-50%, -100%); white-space: nowrap; font-size: 13px; font-weight: 600;
+    padding: 4px 9px; border-radius: 6px; background: rgba(14, 16, 19, .78); border: 1px solid rgba(200, 214, 106, .55);
+    color: var(--fg); margin-top: -10px; }
+  .tag::after { content: ""; position: absolute; left: 50%; top: 100%; width: 1px; height: 10px; background: rgba(200,214,106,.7); }
+  #help { position: fixed; right: 24px; top: 24px; font-size: 12px; color: var(--dim); text-align: right; line-height: 1.7; pointer-events: none; }
+  #help b { color: var(--fg); font-weight: 600; }
+  body.clean #help, body.clean #status { display: none; }
+  .tag.focus { font-size: 16px; padding: 6px 12px; border-color: var(--accent); }
+  .tag .desc { display: none; }
+  .tag.docked { position: fixed; left: 32px !important; top: 124px !important; transform: none; margin-top: 0; }
+  .tag.docked::after { display: none; }
+  #simBtn { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); font: inherit; font-size: 14px; font-weight: 600;
+    color: #14160f; background: var(--accent); border: 0; border-radius: 999px; padding: 10px 20px; cursor: pointer; }
+  body.simming #simBtn { display: none; }
+  #sim { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(680px, calc(100vw - 32px)); display: none;
+    background: rgba(14,16,19,.86); border: 1px solid rgba(200,214,106,.45); border-radius: 14px; padding: 14px 18px 12px; }
+  body.simming #sim { display: block; }
+  #sim .head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  #sim .ttl { font-size: 13px; color: var(--accent); font-weight: 700; letter-spacing: .04em; }
+  #sim .cnt { font: 600 12px ui-monospace, Menlo, monospace; color: var(--dim); }
+  #sim .txt { font-size: 17px; line-height: 1.5; margin-top: 6px; min-height: 52px; }
+  #sim .bar { display: flex; gap: 4px; margin-top: 10px; }
+  #sim .bar i { flex: 1; height: 3px; border-radius: 2px; background: rgba(255,255,255,.15); overflow: hidden; }
+  #sim .bar i b { display: block; height: 100%; width: 0; background: var(--accent); }
+  #sim .ctrl { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+  #sim .ctrl button { font: inherit; font-size: 13px; color: var(--fg); background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.18);
+    border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+  #bang { position: fixed; left: 50%; top: 42%; transform: translate(-50%, -50%) scale(.6); font-size: 120px; font-weight: 900;
+    color: #FFD34D; text-shadow: 0 0 40px rgba(255,140,0,.8), 0 4px 0 #b34700; opacity: 0; pointer-events: none; letter-spacing: -.02em; }
+  #bang.go { animation: bang .9s ease-out; }
+  @keyframes bang { 0% { opacity: 0; transform: translate(-50%,-50%) scale(.5); } 15% { opacity: 1; transform: translate(-50%,-50%) scale(1.15); }
+    60% { opacity: 1; transform: translate(-50%,-50%) scale(1); } 100% { opacity: 0; transform: translate(-50%,-50%) scale(1.05); } }
+  body.simming #gauge { display: none; }
+  .chip { position: absolute; transform: translate(-50%, -100%); margin-top: -6px; pointer-events: none;
+    font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(14,16,19,.82); border: 1px solid rgba(143,199,255,.5);
+    color: var(--fg); white-space: nowrap; }
+  .chip::after { content: ""; position: absolute; left: 50%; top: 100%; width: 1px; height: 6px; background: rgba(143,199,255,.7); }
+  .chip b { font-weight: 600; }
+  .chip span { display: none; }
+  .chip.on { z-index: 2; border-color: #8FC7FF; font-size: 12px; padding: 5px 9px; white-space: normal; width: max-content; max-width: 260px; }
+  .chip.on span { display: block; color: var(--dim); margin-top: 2px; line-height: 1.4; }
+  .tag.focus .desc { display: block; font-size: 13px; font-weight: 400; color: var(--dim); margin-top: 3px;
+    white-space: normal; width: max-content; max-width: 320px; line-height: 1.45; }
+  #cursor { position: fixed; width: 44px; height: 44px; margin: -22px 0 0 -22px; pointer-events: none; display: none; }
+  #cursor.on { display: block; }
+  #cursor circle { fill: none; stroke-width: 3; }
+  #cursor .base { stroke: rgba(255,255,255,.35); }
+  #cursor .prog { stroke: var(--accent); stroke-dasharray: 100; stroke-dashoffset: 100; transform: rotate(-90deg); transform-origin: 50% 50%; }
+  #cursor .dot { fill: var(--accent); stroke: none; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="labels"></div>
+<div id="title"><div class="code" id="code"></div><div class="name" id="name"></div>
+  <div class="note">공개 자료 기반 개념도 · 실제 설계·부품 배치와 다를 수 있음</div></div>
+<div id="gauge"><div class="lab"><span>EXPLODE</span><span id="pct">0%</span></div><div class="bar"><div class="fill" id="fill"></div></div></div>
+<div id="cam"><video id="video" playsinline muted></video><canvas id="overlay"></canvas></div>
+<div id="status">불러오는 중…</div>
+<button id="simBtn">▶ 작동 보기 <span style="opacity:.6;font-weight:500">(S)</span></button>
+<div id="sim"><div class="head"><span class="ttl"></span><span class="cnt"></span></div><div class="txt"></div><div class="bar"></div>
+  <div class="ctrl"><button data-a="prev">◀ 이전</button><button data-a="play">⏸ 멈춤</button><button data-a="next">다음 ▶</button><button data-a="close">✕ 닫기</button></div></div>
+<div id="bang"></div>
+<svg id="cursor" viewBox="0 0 44 44"><circle class="base" cx="22" cy="22" r="16"/><circle class="prog" cx="22" cy="22" r="16" pathLength="100"/><circle class="dot" cx="22" cy="22" r="4"/></svg>
+<div id="help"><b>손 이동</b> 회전 · <b>손 펴기</b> 분해(그대로 유지) · <b>주먹 0.5초</b> 조립<br><b>양손 벌리기·모으기</b> 확대·축소<br><b>검지로 가리켜 머물기</b> 부품 보기 · <b>주먹 0.5초</b> 전체로<br><b>주먹 흔들기</b> 또는 <b>S</b> 작동 보기 · <b>1–5</b> 제품 · <b>L</b> 라벨 · <b>C</b> 카메라 · <b>H</b> 도움말 · <b>+ − 0</b> 확대 · <b>Esc</b></div>
+
+<script src="models/sb300.js"></script>
+<script src="models/quad.js"></script>
+<script src="models/nvg.js"></script>
+<script src="models/ugs.js"></script>
+<script src="models/k2c1.js"></script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const MP = '1.0.1';
+const WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP}/wasm`;
+const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task';
+
+const ORDER = ['sb300', 'quad', 'nvg', 'ugs', 'k2c1'];
+const NAMES = {
+  sb300: 'Switchblade 300 배회탄약', quad: '정찰 쿼드콥터', nvg: '야간투시경 (PVS-7형)',
+  ugs: '무인 지상 감시 센서', k2c1: 'K2C1 소총',
+};
+const params = new URLSearchParams(location.search);
+const TEST = params.has('test');            // 시험용: 부드럽게 따라가기를 끄고 값이 바로 먹게
+if (params.has('clean')) document.body.classList.add('clean');
+
+/* ───────── 렌더러·장면 ───────── */
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, preserveDrawingBuffer: TEST });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.AgXToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setClearColor(0x000000, 0);
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.3;   // 높이면 검정·카본이 회색으로 뜬다 (Blender 병기고에서도 같은 문제)
+const camera = new THREE.PerspectiveCamera(30, 16 / 9, 0.001, 50);
+
+// Blender(Z-up) → three(Y-up)
+const b2t = (v) => new THREE.Vector3(v[0], v[2], -v[1]);
+
+// 병기고 조명: 위-앞 주광, 앞뒤 차가운 윤곽광, 아래 약한 보조광 (Blender studio_armory 와 같은 배치)
+function light(pos, intensity, color = 0xffffff) {
+  const l = new THREE.DirectionalLight(color, intensity);
+  l.position.copy(b2t(pos));
+  scene.add(l);
+  return l;
+}
+const keyLight = light([0.5, -1.0, 1.1], 2.6);    // 주광만 그림자를 드리운다 (부품끼리 서로 가리는 그림자)
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(2048, 2048);
+keyLight.shadow.bias = -0.0004;
+keyLight.shadow.normalBias = 0.0015;
+scene.add(keyLight.target);
+light([1.4, 0.3, 0.35], 1.6, 0xccdfff);
+light([-1.4, 0.3, 0.35], 1.6, 0xccdfff);
+light([0.0, -0.6, -0.9], 0.35);
+
+/* ───────── 재질 (Blender 재질 이름 끝으로 고른다) ───────── */
+const MAT = {
+  carbon:   () => new THREE.MeshPhysicalMaterial({ color: 0x1a1b1e, roughness: 0.5, metalness: 0.1, clearcoat: 0.25, clearcoatRoughness: 0.3 }),
+  olive:    () => new THREE.MeshStandardMaterial({ color: 0x4B5320, roughness: 0.85, metalness: 0.0 }),
+  black:    () => new THREE.MeshStandardMaterial({ color: 0x1C1C1C, roughness: 0.6, metalness: 0.0 }),
+  gunmetal: () => new THREE.MeshStandardMaterial({ color: 0x2A2D34, roughness: 0.45, metalness: 0.75 }),
+  metal:    () => new THREE.MeshStandardMaterial({ color: 0xB8BCC2, roughness: 0.3, metalness: 1.0 }),
+  pcb:      () => new THREE.MeshPhysicalMaterial({ color: 0x0E6B34, roughness: 0.45, clearcoat: 0.4, clearcoatRoughness: 0.2 }),
+  ceramic:  () => new THREE.MeshStandardMaterial({ color: 0xD9D2BE, roughness: 0.5 }),
+  gold:     () => new THREE.MeshStandardMaterial({ color: 0xC9A34A, roughness: 0.25, metalness: 1.0 }),
+  led:      () => new THREE.MeshStandardMaterial({ color: 0xFF3B30, roughness: 0.3, emissive: 0xFF2A1F, emissiveIntensity: 1.2 }),
+  copper:   () => new THREE.MeshStandardMaterial({ color: 0xB06A3B, roughness: 0.3, metalness: 1.0 }),
+  cell:     () => new THREE.MeshPhysicalMaterial({ color: 0x1F4E79, roughness: 0.45, clearcoat: 0.3, clearcoatRoughness: 0.25 }),
+  phosphor: () => new THREE.MeshStandardMaterial({ color: 0x3FA34D, roughness: 0.35, emissive: 0x1d5a25, emissiveIntensity: 0.6 }),
+  glass:    () => new THREE.MeshPhysicalMaterial({ color: 0xDDE6EE, roughness: 0.05, metalness: 0, transmission: 1,
+                                                   ior: 1.45, thickness: 0.002, transparent: true, opacity: 0.9 }),
+};
+/* ───────── 표면 질감 (셰이더) ─────────
+   모델에 UV 가 없어서, 부품 좌표(object space)로 잡음을 만들어 질감을 얹는다 → 분해해도 무늬가 부품에 붙어 다닌다.
+   · mottle: 색 얼룩   · rough: 거칠기 변화   · bump(높이 m)·freq(1/m): 표면 요철 (분체도장·폴리머 오돌토돌·헤어라인)
+   · brush: 한 방향으로 늘인 결 (금속)   · wear: 모서리 칠 벗겨짐 — 화면에서 법선이 급하게 꺾이는 곳(베벨) = 모서리 */
+const SURF = {
+  olive:    { mottle: 0.16, rough: 0.12, bump: 0.000030, freq: 900,  brush: 0,   wear: 0.9, wearColor: 0x6E6A5C },
+  black:    { mottle: 0.10, rough: 0.10, bump: 0.000028, freq: 1500, brush: 0,   wear: 0.5, wearColor: 0x55575B },
+  gunmetal: { mottle: 0.08, rough: 0.22, bump: 0.000010, freq: 1200, brush: 1,   wear: 0.9, wearColor: 0xA9ADB3 },
+  metal:    { mottle: 0.05, rough: 0.14, bump: 0.000006, freq: 1600, brush: 1,   wear: 0,   wearColor: 0xffffff },
+  carbon:   { mottle: 0.06, rough: 0.10, bump: 0.000008, freq: 1800, brush: 0,   wear: 0.3, wearColor: 0x3A3B3E },
+  pcb:      { mottle: 0.05, rough: 0.10, bump: 0.000006, freq: 2000, brush: 0,   wear: 0,   wearColor: 0xffffff },
+  ceramic:  { mottle: 0.05, rough: 0.08, bump: 0.000006, freq: 2500, brush: 0,   wear: 0,   wearColor: 0xffffff },
+  gold:     { mottle: 0.04, rough: 0.08, bump: 0.000004, freq: 2500, brush: 0,   wear: 0,   wearColor: 0xffffff },
+  copper:   { mottle: 0.08, rough: 0.12, bump: 0.000006, freq: 2000, brush: 1,   wear: 0,   wearColor: 0xffffff },
+  cell:     { mottle: 0.05, rough: 0.08, bump: 0.000005, freq: 1500, brush: 0,   wear: 0,   wearColor: 0xffffff },
+};
+const NOISE_GLSL = /* glsl */`
+  float h3(vec3 p) { p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419)); p *= 17.0;
+                     return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+  float vnoise(vec3 x) { vec3 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(h3(i), h3(i + vec3(1,0,0)), f.x), mix(h3(i + vec3(0,1,0)), h3(i + vec3(1,1,0)), f.x), f.y),
+               mix(mix(h3(i + vec3(0,0,1)), h3(i + vec3(1,0,1)), f.x), mix(h3(i + vec3(0,1,1)), h3(i + vec3(1,1,1)), f.x), f.y), f.z); }
+  float fbm(vec3 p) { float a = 0.5, s = 0.0; for (int i = 0; i < 4; i++) { s += a * vnoise(p); p = p * 2.03 + 11.7; a *= 0.5; } return s; }
+  float surfH(vec3 p) {                        // 요철 높이 0..1 (0.5 중심)
+    vec3 q = p * uFreq;
+    if (uBrush > 0.5) q = vec3(p.x * uFreq * 0.02, p.y * uFreq, p.z * uFreq);   // x 방향으로 늘인 결
+    // 무늬가 화면 한 픽셀보다 촘촘해지면(멀리 있거나 가는 부품) 자글거리니 0.5 쪽으로 눌러 없앤다
+    float fw = length(fwidth(q));
+    return mix(fbm(q), 0.5, smoothstep(0.35, 1.2, fw));
+  }
+  vec3 bumpN(vec3 surf_pos, vec3 surf_norm, float h, float faceDir) {   // 높이의 화면 미분으로 법선 기울이기
+    vec3 vSigmaX = dFdx(surf_pos), vSigmaY = dFdy(surf_pos), vN = surf_norm;
+    vec3 R1 = cross(vSigmaY, vN), R2 = cross(vN, vSigmaX);
+    float fDet = dot(vSigmaX, R1) * faceDir;
+    vec2 dH = vec2(dFdx(h), dFdy(h));
+    vec3 vGrad = sign(fDet) * (dH.x * R1 + dH.y * R2);
+    return normalize(abs(fDet) * surf_norm - vGrad);
+  }
+`;
+function enhance(mat, key) {
+  const c = SURF[key];
+  if (!c) return mat;
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, { uMottle: { value: c.mottle }, uRough: { value: c.rough }, uBump: { value: c.bump },
+      uFreq: { value: c.freq }, uBrush: { value: c.brush }, uWear: { value: c.wear }, uWearColor: { value: new THREE.Color(c.wearColor) } });
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vObj;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvObj = position;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', `#include <common>
+        varying vec3 vObj;
+        uniform float uMottle, uRough, uBump, uFreq, uBrush, uWear; uniform vec3 uWearColor;
+        ${NOISE_GLSL}`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        float nLarge = fbm(vObj * 60.0);                                  // 몇 cm 짜리 얼룩
+        float nSmall = surfH(vObj);
+        diffuseColor.rgb *= 1.0 + uMottle * (nLarge - 0.5) * 2.0;
+        // 모서리: 화면에서 법선이 급하게 변하는 곳. 잡음으로 군데군데만 벗겨지게
+        float edge = smoothstep(0.10, 0.35, length(fwidth(vNormal))) * smoothstep(0.35, 0.65, fbm(vObj * 400.0 + 3.0));
+        float wear = uWear * edge;
+        diffuseColor.rgb = mix(diffuseColor.rgb, uWearColor, wear);`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        roughnessFactor = clamp(roughnessFactor + uRough * (nSmall - 0.5) * 2.0 + uRough * (nLarge - 0.5) - 0.25 * wear, 0.04, 1.0);`)
+      .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>
+        metalnessFactor = mix(metalnessFactor, 1.0, wear);`)
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+        normal = bumpN(-vViewPosition, normal, nSmall * uBump, faceDirection);`);
+  };
+  mat.customProgramCacheKey = () => 'surf-' + key;
+  return mat;
+}
+
+const matCache = {};
+function materialFor(name) {
+  const key = Object.keys(MAT).find(k => name.endsWith('_' + k)) || 'black';
+  return { base: (matCache[key] ||= MAT[key]()), key };
+}
+
+/* ───────── 제품 불러오기 ───────── */
+const loader = new GLTFLoader();
+const products = {};          // code → { group, parts, meta }
+const holder = new THREE.Group();   // 손으로 돌리는 틀
+scene.add(holder);
+
+function b64ToBuf(b64) {
+  const s = atob(b64), u = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+  return u.buffer;
+}
+
+function loadProduct(code) {
+  const M = window.MODELS?.[code];
+  if (!M) return Promise.reject(new Error(`models/${code}.js 없음`));
+  return new Promise((res, rej) => loader.parse(b64ToBuf(M.glb), '', gltf => {
+    const group = gltf.scene;
+    const parts = [];
+    group.traverse(o => {
+      if (o.isMesh) {                      // 부품 보기에서 부품마다 흐리게·강조해야 해서 메시마다 복제
+        const { base, key } = materialFor(o.material?.name || '');
+        o.material = enhance(base.clone(), key);
+        o.castShadow = o.receiveShadow = key !== 'glass';
+        o.material.userData.baseOp = o.material.opacity;
+        o.material.userData.baseTransparent = o.material.transparent;
+      }
+      const u = o.userData;
+      if (u && u.explode_dir) {
+        parts.push({
+          obj: o, rest: o.position.clone(), restQ: o.quaternion.clone(),
+          dir: b2t(u.explode_dir).normalize(), dist: u.explode_dist, order: u.explode_order,
+          label: u.label_ko, desc: u.desc_ko || '',
+          chips: JSON.parse(u.chips || '[]').map(c => ({ ...c, pos: b2t(c.pos) })),   // 기판 위 칩 이름표 (부품 좌표)
+          fold: u.fold_pivot ? { pivot: b2t(u.fold_pivot), angle: u.fold_angle } : null,
+        });
+      }
+    });
+    products[code] = { group, parts, meta: M.meta };
+    res(products[code]);
+  }, rej));
+}
+
+/* ───────── 분해 계산 (Blender 드라이버와 같은 식) ───────── */
+const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+const Y = new THREE.Vector3(0, 1, 0);
+const tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3();
+
+function applyExplode(p, f) {
+  const { stagger: k, window: w } = p.meta;
+  // sb300: 튜브가 빠지는 동안 날개를 편다 (Blender 키: 프레임 12 → 26)
+  const deploy = sim.on && sim.deploy !== null ? sim.deploy : Math.min(1, Math.max(0, (f * 59 - 11) / 14));
+  for (const part of p.parts) {
+    const s = (part.order - 1) * k;
+    const t = smooth(s, s + w, f);
+    part.t = t;                                   // 이 부품이 얼마나 빠져나왔나 (라벨 켜기에 쓴다)
+    tmpV.copy(part.rest);
+    part.obj.quaternion.copy(part.restQ);
+    if (part.fold) {
+      const a = (1 - deploy) * part.fold.angle;
+      tmpQ.setFromAxisAngle(Y, a);
+      tmpV.sub(part.fold.pivot).applyQuaternion(tmpQ).add(part.fold.pivot);
+      part.obj.quaternion.premultiply(tmpQ);
+    }
+    part.obj.position.copy(tmpV).addScaledVector(part.dir, part.dist * t);
+  }
+}
+
+/* ───────── 현재 제품 · 카메라 ───────── */
+let cur = null;
+const state = { f: 0, fTarget: 0, yaw: 0, yawT: 0, pitch: 0, pitchT: 0, labels: true, auto: false };
+
+/* 돌리면 부품이 화면 밖으로 나갈 수 있어서, 매 프레임 부품 꼭짓점이 화면 가장자리(FIT)를 넘으면
+   카메라를 시선 방향으로 뒤로 뺀다(zoom ≥ 1). 원래 구도보다 가까이 가지는 않는다. */
+const FIT = { side: 0.9, top: 0.78, bottom: 0.9 };   // 위쪽은 라벨이 부품 위에 붙으니 더 비운다
+const cam0 = { pos: new THREE.Vector3(), look: new THREE.Vector3() };
+let zoom = 1;
+const simBox = new THREE.Box3();
+/* view: user = 사용자 확대(거리 배율, 작을수록 가까이), focus = 부품 보기 섞임 0..1, part = 보고 있는 부품 */
+const view = { user: 1, userT: 1, focus: 0, part: null, shown: null, hover: null };
+const USER_MIN = 0.15, USER_MAX = 2.2;          // 확대 최대 ≈ 6.7배 (칩까지 들여다보게)
+const lookNow = new THREE.Vector3(), camOff = new THREE.Vector3(), focusC = new THREE.Vector3(), sph = new THREE.Sphere();
+function placeCamera() {
+  camOff.copy(cam0.pos).sub(cam0.look);
+  let z = zoom;
+  lookNow.copy(cam0.look);
+  if (view.focus > 0.001 && view.shown) {           // 부품을 화면 가운데로, 부품 크기에 맞는 거리로
+    box.setFromObject(view.shown.obj);
+    box.getBoundingSphere(sph);
+    const half = THREE.MathUtils.degToRad(camera.fov) / 2;
+    const halfMin = Math.min(half, Math.atan(Math.tan(half) * camera.aspect));
+    const zf = sph.radius / Math.sin(halfMin) / 0.55 / camOff.length();
+    lookNow.lerp(sph.center, view.focus);
+    z += (zf - z) * view.focus;
+  }
+  z *= view.user;                                    // 사용자 확대는 부품 보기 중에도 먹는다
+  camera.position.copy(lookNow).addScaledVector(camOff, z);
+  camera.updateMatrixWorld();
+}
+function frameCamera() {
+  const m = cur.meta.cam;
+  const pos = b2t(m.pos), fwd = b2t(m.fwd).normalize();
+  cam0.pos.copy(pos);
+  cam0.look.copy(pos).addScaledVector(fwd, -pos.dot(fwd));   // 시선 위에서 원점(회전 중심)에 가장 가까운 점
+  zoom = 1;
+  view.user = view.userT = 1; view.focus = 0; view.part = view.shown = view.hover = null;
+  camera.position.copy(pos);
+  camera.lookAt(pos.clone().add(fwd));
+  const aspect = innerWidth / innerHeight;
+  let vfov = m.vfov;
+  if (aspect < 16 / 9) {   // 세로로 좁은 화면이면 가로 범위를 지키도록 넓힌다
+    vfov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(vfov) / 2) * (16 / 9) / aspect));
+  }
+  camera.fov = vfov;
+  camera.aspect = aspect;
+  camera.updateProjectionMatrix();
+}
+
+const labelsEl = document.getElementById('labels');
+function buildLabels() {
+  labelsEl.innerHTML = '';
+  for (const part of cur.parts) {
+    if (!part.label) continue;             // 기준 부품(dist 0)도 이름을 단다
+    const el = document.createElement('div');
+    el.className = 'tag';
+    el.textContent = part.label;
+    if (part.desc) {                                    // 부품 보기에서만 보이는 한 줄 설명
+      const d = document.createElement('div');
+      d.className = 'desc'; d.textContent = part.desc;
+      el.appendChild(d);
+    }
+    labelsEl.appendChild(el);
+    part.tag = el;
+    part.chipEls = part.chips.map(c => {                // 부품 보기에서만 보이는 칩 이름표
+      const e = document.createElement('div');
+      e.className = 'chip';
+      e.innerHTML = `<b></b><span></span>`;
+      e.querySelector('b').textContent = c.name;
+      e.querySelector('span').textContent = c.desc;
+      labelsEl.appendChild(e);
+      return e;
+    });
+  }
+}
+
+async function show(code) {
+  if (sim.on) simStop();
+  if (!products[code]) await loadProduct(code);
+  if (cur) holder.remove(cur.group);
+  cur = products[code];
+  holder.add(cur.group);
+  document.getElementById('code').textContent = code.toUpperCase();
+  document.getElementById('name').textContent = NAMES[code];
+  frameCamera();
+  prepareAnchors(cur);
+  buildLabels();
+  anchorAt = 0;
+}
+
+/* ───────── 라벨 위치 ─────────
+   기본은 부품 경계상자 위쪽 가운데. 그 점이 다른 부품에 가려지면(핀 헤더가 기판 밑에 숨는 경우 등)
+   부품 꼭짓점 중 카메라에서 보이는 것 가운데 기본 점과 화면상 가장 가까운 점으로 옮긴다.
+   다 가려졌으면 라벨을 숨긴다. 광선 검사는 무거우니 ANCHOR_MS 마다 한 번만 하고,
+   고른 점은 부품 로컬 좌표로 들고 있다가 매 프레임 투영한다. */
+const box = new THREE.Box3(), c3 = new THREE.Vector3(), ideal = new THREE.Vector3();
+const ray = new THREE.Raycaster(), rayDir = new THREE.Vector3(), camPos = new THREE.Vector3();
+const ANCHOR_MS = 150, SAMPLES = 48;
+let anchorAt = 0;
+
+function prepareAnchors(p) {           // 부품마다 꼭짓점 표본(로컬 좌표)과 메시 → 부품 표
+  if (p.meshOwner) return;
+  p.meshes = [];
+  p.meshOwner = new Map();
+  for (const part of p.parts) {
+    const pts = [];
+    part.obj.updateWorldMatrix(true, true);
+    const inv = part.obj.matrixWorld.clone().invert();
+    part.obj.traverse(o => {
+      if (!o.isMesh) return;
+      p.meshes.push(o);
+      p.meshOwner.set(o, part);
+      const pos = o.geometry.attributes.position;
+      const m = inv.clone().multiply(o.matrixWorld);
+      for (let i = 0; i < pos.count; i++) pts.push(new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(m));
+    });
+    const step = Math.max(1, Math.floor(pts.length / SAMPLES));
+    part.samples = pts.filter((_, i) => i % step === 0);
+  }
+  for (const part of p.parts) part.others = p.meshes.filter(m => p.meshOwner.get(m) !== part);
+}
+
+function visible(world, part) {        // 카메라 → 점 사이에 다른 부품이 있으면 가려진 것
+  if (view.part === part) return true;  // 부품 보기: 나머지는 반투명이라 가리지 않는다
+  if (sim.on) return true;              // 작동 보기: 투시 중이라 가리는 부품이 없다
+  rayDir.copy(world).sub(camPos);
+  const d = rayDir.length();
+  ray.set(camPos, rayDir.divideScalar(d));
+  ray.far = d * 0.999;
+  for (const m of part.others) if (ray.intersectObject(m, false).length) return false;
+  return true;
+}
+
+function chooseAnchors() {
+  camera.getWorldPosition(camPos);
+  for (const part of cur.parts) {
+    if (!part.tag) continue;
+    box.setFromObject(part.obj);
+    box.getCenter(ideal);
+    ideal.y = box.max.y;
+    if (visible(ideal, part)) { part.anchor = null; continue; }   // null = 기본 점
+    // 기본 점과 화면상 가까운 순으로 늘어놓고, 처음 보이는 점에서 멈춘다 (광선 수를 줄이려고)
+    const target = ideal.clone().project(camera);
+    const cand = part.samples.map(s => {
+      const w = s.clone().applyMatrix4(part.obj.matrixWorld);
+      const q = w.clone().project(camera);
+      return { s, w, dd: (q.x - target.x) ** 2 + ((q.y - target.y) / camera.aspect) ** 2 - q.y * 1e-3 }; // 동점이면 위쪽
+    }).sort((a, b) => a.dd - b.dd);
+    part.anchor = cand.find(c => visible(c.w, part))?.s || 'hidden';
+  }
+}
+
+/* 칩 이름표: 부품 보기로 충분히 다가갔을 때만. 커서(손·마우스)에 가장 가까운 칩은 설명까지 편다 */
+let mouseXY = null;
+addEventListener('pointermove', e => (mouseXY = { x: e.clientX, y: e.clientY }));
+function placeChips(part) {
+  const on = part === view.part && view.focus > 0.7;
+  if (!part.chipEls?.length) return;
+  const cur = pointer.on ? { x: pointer.x * innerWidth, y: pointer.y * innerHeight } : mouseXY;
+  let best = null, bestD = 70 * 70;
+  part.chips.forEach((c, i) => {
+    const el = part.chipEls[i];
+    if (!on) { el.style.display = 'none'; return; }
+    c3.copy(c.pos).applyMatrix4(part.obj.matrixWorld).project(camera);
+    const x = (c3.x * 0.5 + 0.5) * innerWidth, y = (-c3.y * 0.5 + 0.5) * innerHeight;
+    el.style.display = ''; el.style.left = `${x}px`; el.style.top = `${y}px`;
+    el.classList.remove('on');
+    if (cur) { const d = (x - cur.x) ** 2 + (y - cur.y) ** 2; if (d < bestD) { bestD = d; best = el; } }
+  });
+  best?.classList.add('on');
+}
+
+function placeLabels(now) {
+  const op = state.labels ? Math.max(smooth(0.35, 0.6, state.f), view.part || pointer.on || sim.on ? 1 : 0) : 0;
+  labelsEl.style.opacity = op;
+  if (op <= 0) return;
+  holder.updateMatrixWorld(true);
+  if (now - anchorAt > ANCHOR_MS || TEST) { chooseAnchors(); anchorAt = now; }
+  for (const part of cur.parts) {
+    if (!part.tag) continue;
+    // 아직 제자리에 있는 부품(덜 빠져나온 속 부품)은 라벨을 숨긴다 — 분해 중간에 라벨이 몸통 위로 몰리지 않게.
+    // 기준 부품(dist 0)은 거의 다 분해됐을 때만. 부품 보기 중에는 그 부품만.
+    const out = part.dist > 0 ? part.t > 0.6 : state.f > 0.85;
+    const show = sim.on ? sim.lit.has(part) : view.part ? part === view.part : out;
+    if (part.anchor === 'hidden' || !show) { part.tag.style.display = 'none'; placeChips(part); continue; }
+    part.tag.classList.toggle('focus', part === view.part);
+    placeChips(part);
+    const docked = part === view.part && part.chips.length > 0 && view.focus > 0.7;
+    part.tag.classList.toggle('docked', docked);
+    if (docked) { part.tag.style.left = ''; part.tag.style.top = ''; continue; }   // 칩 이름표가 있으면 부품 라벨은 왼쪽 위 패널로
+    if (part === view.part) {                  // 부품 보기: 화면에서 부품이 차지하는 영역의 맨 위 가운데 (설명이 부품을 안 가리게)
+      let minY = Infinity, minX = Infinity, maxX = -Infinity;
+      for (const smp of part.samples) {
+        c3.copy(smp).applyMatrix4(part.obj.matrixWorld).project(camera);
+        minX = Math.min(minX, c3.x); maxX = Math.max(maxX, c3.x); minY = Math.min(minY, -c3.y);
+      }
+      part.tag.style.left = `${((minX + maxX) / 2 * 0.5 + 0.5) * innerWidth}px`;
+      part.tag.style.top = `${(minY * 0.5 + 0.5) * innerHeight}px`;
+      continue;
+    }
+    part.tag.style.display = '';
+    if (part.anchor) c3.copy(part.anchor).applyMatrix4(part.obj.matrixWorld);
+    else { box.setFromObject(part.obj); box.getCenter(c3); c3.y = box.max.y; }
+    c3.project(camera);
+    part.tag.style.left = `${(c3.x * 0.5 + 0.5) * innerWidth}px`;
+    part.tag.style.top = `${(-c3.y * 0.5 + 0.5) * innerHeight}px`;
+  }
+}
+
+/* ───────── 손 인식 ───────── */
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d');
+let hands = null, lastSeen = 0, lastVideoTime = -1;
+const status = document.getElementById('status');
+function say(msg, hideAfter = 0) {
+  status.innerHTML = msg; status.style.opacity = 1;
+  if (hideAfter) setTimeout(() => (status.style.opacity = 0), hideAfter);
+}
+
+async function startHands() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' } });
+    video.srcObject = stream;
+    await video.play();
+    overlay.width = video.videoWidth; overlay.height = video.videoHeight;
+  } catch (e) {
+    console.warn(e);
+    say('카메라를 못 열었습니다 — <b>마우스</b>로 조작하세요 (드래그 회전 · 휠 분해)', 6000);
+    document.getElementById('cam').classList.add('off');
+    return;
+  }
+  say('손 인식을 불러오는 중… (처음 한 번만 받습니다)');
+  try {
+    const { FilesetResolver, HandLandmarker } =
+      await import(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP}/vision_bundle.mjs`);
+    const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
+    const make = (delegate) => HandLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: HAND_MODEL, delegate },
+      runningMode: 'VIDEO', numHands: 2, minHandDetectionConfidence: 0.5, minTrackingConfidence: 0.5,
+    });
+    try { hands = await make('GPU'); } catch (e) { console.warn('GPU 실패 → CPU', e); hands = await make('CPU'); }
+    say('준비 끝 — <b>손을 펴면 분해</b>, <b>주먹 0.5초면 조립</b>, <b>검지</b>로 부품 보기, <b>양손</b>으로 확대', 5000);
+  } catch (e) {
+    console.error(e);
+    say('손 인식 모델을 못 받았습니다(인터넷 확인). 마우스로는 그대로 됩니다.', 6000);
+  }
+}
+
+const d2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const d3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, (a.z || 0) - (b.z || 0));
+const DEBUG = params.has('debug');   // ?debug: 손 수치를 화면 위에 계속 띄운다 (기준값 맞출 때)
+const dbg = { ratio: 0, index: 0, rest: 0, mode: '' };
+
+/* 손가락별 펼침비 = 손끝~손목 거리 ÷ 손바닥 길이(손목~중지 뿌리). 주먹 ≈ 1.0, 활짝 ≈ 2.0
+   3D 좌표(worldLandmarks, 미터)가 있으면 그걸 쓴다 — 손을 틀어도(8자 회전) 원근으로 짧아지지 않는다.
+   시험에서 2D 만 넣으면 2D 로 계산한다. */
+function fingerRatios(lm) {
+  const d = lm[0].z === undefined || lm.is2d ? d2 : d3;
+  const palm = d(lm[0], lm[9]) || 1e-3;
+  return [8, 12, 16, 20].map(i => d(lm[i], lm[0]) / palm);
+}
+function openness(lm) {
+  const r = fingerRatios(lm);
+  dbg.ratio = r.reduce((a, b) => a + b, 0) / 4;
+  return Math.min(1, Math.max(0, (dbg.ratio - 1.15) / (1.85 - 1.15)));
+}
+// 가리키기: 검지만 펴고 나머지 셋은 접음
+function isPointing(lm) {
+  const [ix, ...rest] = fingerRatios(lm);
+  dbg.index = ix; dbg.rest = Math.max(...rest);
+  return ix > 1.45 && dbg.rest < 1.45 && ix - dbg.rest > 0.3;   // 검지가 나머지보다 확실히 더 펴져 있으면
+}
+// 진짜 주먹: 검지까지 네 손가락이 다 접힘 (가리키는 손은 검지가 펴져 있어서 절대 주먹이 아니다)
+const isFist = (lm) => Math.max(...fingerRatios(lm)) < 1.3;
+const palmOf = (lm) => ({ x: 1 - (lm[0].x + lm[5].x + lm[17].x) / 3, y: (lm[0].y + lm[5].y + lm[17].y) / 3 }); // 좌우 거울
+
+function readHands(now) {
+  if (!hands || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  const r = hands.detectForVideo(video, now);
+  const L = r.landmarks || [];
+  drawOverlay(L);
+  if (L.length) applyHands(L, r.worldLandmarks, now);
+  else noHands(now);
+  if (DEBUG) say(L.length ? `${dbg.mode} · 펼침비 ${dbg.ratio.toFixed(2)} (주먹 1.15 ↔ 활짝 1.85) · 검지 ${dbg.index.toFixed(2)} / 나머지 ${dbg.rest.toFixed(2)}`
+                          + ` · 분해 ${Math.round(state.fTarget * 100)}% · 확대 ${(1 / view.userT).toFixed(2)}×` : '손 없음');
+}
+
+/* 손 좌표 → 목표값 (시험에서는 APP.feed 로 직접 넣는다. W 는 3D 좌표, 없으면 2D)
+   한 손 펴기·주먹 = 분해, 손 위치 = 회전 / 한 손 검지 = 커서(부품 보기) / 양손 간격 = 확대·축소 */
+/* 감도·안정화
+   · 손 개수나 모양(한 손/가리키기/양손)이 바뀐 직후 SETTLE 동안은 아무 값도 바꾸지 않는다 — 바뀌는 순간 튀는 것 방지
+   · 회전은 '손을 움직인 만큼'(상대). 한 손이 새로 잡히면 그 자리를 기준으로 삼아서, 양손 → 한 손 때 휙 돌지 않는다
+   · 분해는 잠금식 — 아래 '분해 잠금' 참고 */
+const EXPLODE_FOLLOW = 0.04;       // 분해 따라가기 (프레임당 남은 거리의 비율). 클수록 빠르다 — 예전 0.1
+const SETTLE = 300, FIST_HOLD = 500, LOST_MS = 400, OPEN_HOLD = 400;   // OPEN_HOLD: 편 채로 이만큼 있어야 분해 시작
+let openSince = 0;
+let lostAt = 0, modeSettle = SETTLE;
+const GAIN = { yaw: 2.6, pitch: 1.8, zoom: 0.8 };   // yaw: 화면 폭 전체 = 2 rad, pitch: 높이 전체 = 1.4 rad, zoom: 간격비의 지수
+let pinch = null, pointFrames = 0, fistSince = 0;
+let mode = 'none', modeSince = 0, grab = null;
+const palmF = { x: 0, y: 0 };
+function setMode(m, now) {
+  if (m === mode) return;
+  // 손을 새로 찾았을 때(none →)는 짧게, 손 모양·개수가 바뀔 때는 SETTLE 만큼 기다린다
+  modeSettle = mode === 'none' ? 120 : SETTLE;
+  mode = m; modeSince = now; grab = null; pinch = null;
+}
+function noHands(now) {                  // 손을 잠깐(LOST_MS) 놓친 건 무시 — 회전 기준을 새로 잡지 않는다
+  lostAt ||= now;
+  if (now - lostAt > LOST_MS) { pointer.on = false; setMode('none', now); }
+}
+function applyHands(L, W, now = performance.now()) {
+  lastSeen = now; lostAt = 0;
+  state.auto = false;
+  const shape = (i) => (W && W[i]) || Object.assign(L[i].map(p => ({ x: p.x, y: p.y })), { is2d: true });
+  if (L.length >= 2) {                                   // 양손: 처음 간격 대비 비율만큼 확대 (핀치 줌)
+    setMode('two', now);
+    dbg.mode = '양손 확대';
+    pointer.on = false; pointFrames = 0;
+    if (now - modeSince < modeSettle) return;
+    const a = palmOf(L[0]), b = palmOf(L[1]);
+    const spread = Math.max(0.05, Math.hypot(a.x - b.x, a.y - b.y));
+    if (!pinch) pinch = { spread, user: view.userT };
+    const ratio = pinch.spread / spread;
+    if (Math.abs(ratio - 1) < 0.05) return;             // 손 떨림 정도는 무시
+    view.userT = Math.min(USER_MAX, Math.max(USER_MIN, pinch.user * ratio ** GAIN.zoom));
+    return;
+  }
+  const lm = shape(0);
+  const pointing = isPointing(lm);
+  pointFrames = pointing ? Math.min(pointFrames + 1, 6) : Math.max(pointFrames - 1, 0);
+  if (pointFrames >= 3 || (pointer.on && pointFrames > 0)) {   // 가리키기: 분해·회전은 멈추고 커서만
+    setMode('point', now);
+    dbg.mode = '가리키기';
+    const tip = L[0][8];
+    moveHandPointer(0.5 + ((1 - tip.x) - 0.5) * 1.4, 0.5 + (tip.y - 0.45) * 1.5);
+    return;
+  }
+  if (pointing) { dbg.mode = '가리키기?'; return; }   // 커서가 켜지기 전 몇 프레임도 분해를 건드리지 않는다
+  pointer.on = false;
+  setMode('one', now);
+  dbg.mode = '한 손';
+  const open = openness(lm);
+  const p = palmOf(L[0]);
+  if (now - modeSince < modeSettle) { palmF.x = p.x; palmF.y = p.y; fistSince = 0; return; }
+  /* 분해 잠금: 펴면 편 만큼 벌어지고 그대로 유지된다(오므려도 안 닫힘).
+     닫기는 '진짜 주먹을 FIST_HOLD 동안' 쥘 때만 — 부품 보기 중이면 먼저 전체 보기로, 아니면 조립.
+     그래서 손바닥 → 검지로 바꾸며 손가락이 접히는 순간에도 닫히지 않는다. */
+  const fist = isFist(lm);
+  // 주먹 흔들기(좌우로 SHAKE_REV 번 이상 방향 바꿈) = 작동 보기 켜기/끄기. 흔드는 동안은 조립 타이머를 멈춘다
+  if (fist && fistShake(p.x, now)) {
+    sim.on ? simStop() : simStart();
+    fistSince = now + 1e9;                                     // 이번 주먹으로는 조립하지 않는다
+    return;
+  }
+  if (!fist) resetShake();
+  // 회전: 잡은 자리 기준 상대 이동. 주먹일 때는 안 돈다 (흔들어도 제품이 같이 흔들리지 않게)
+  palmF.x += (p.x - palmF.x) * 0.35; palmF.y += (p.y - palmF.y) * 0.35;   // 손 떨림 줄이기
+  if (fist) grab = null;                                       // 주먹을 풀면 그 자리에서 새로 잡는다 (안 튐)
+  else {
+    if (!grab) grab = { x: palmF.x, y: palmF.y, yaw: state.yawT, pitch: state.pitchT };
+    state.yawT = grab.yaw + (palmF.x - grab.x) * GAIN.yaw;
+    state.pitchT = Math.max(-0.8, Math.min(0.8, grab.pitch + (palmF.y - grab.y) * GAIN.pitch));
+  }
+  if (sim.on) return;                                          // 작동 보기 중: 손으로는 회전·주먹 흔들기(끄기)만
+  // 펴기는 OPEN_HOLD 동안 편 채로 있어야 반영 — 주먹에서 실수로 잠깐 펴도 바로 분해되지 않게
+  if (open > state.fTarget + 0.03) {
+    openSince ||= now;
+    if (now - openSince > OPEN_HOLD) state.fTarget = open;
+    else dbg.mode = `펴는 중 ${Math.round((now - openSince) / OPEN_HOLD * 100)}%`;
+  } else openSince = 0;
+  if (fist) {
+    // '가만히' 쥐고 있을 때만 조립: 흔드는 중이거나 쥔 자리에서 움직였으면 타이머를 다시 시작
+    if (now - shake.lastRev < 400 || Math.abs(p.x - fistX) > SHAKE_AMP) { fistSince = 0; }
+    if (!fistSince) { fistSince = now; fistX = p.x; }
+    dbg.mode = `주먹 ${Math.max(0, Math.min(100, Math.round((now - fistSince) / FIST_HOLD * 100)))}%`;
+    if (now - fistSince > FIST_HOLD) { view.part ? unfocus() : (state.fTarget = 0); fistSince = now + 1e9; }   // 한 번 쥐면 한 번만
+  } else fistSince = 0;
+}
+
+/* 주먹 흔들기 감지: 손바닥 x 의 꺾임(방향 바꿈)을 SHAKE_AMP 이상 움직였을 때만 센다(떨림 무시).
+   SHAKE_WIN 안에 SHAKE_REV 번 → 한 번 발동, 그 뒤 SHAKE_COOL 동안 쉼 */
+const SHAKE_AMP = 0.035, SHAKE_REV = 3, SHAKE_WIN = 1400, SHAKE_COOL = 1500;
+const shake = { ext: null, dir: 0, revs: [], lastRev: -1e9, coolUntil: 0 };
+let fistX = 0;
+function resetShake() { shake.ext = null; shake.dir = 0; shake.revs = []; }
+function fistShake(x, now) {
+  if (shake.ext === null) { shake.ext = x; shake.dir = 0; return false; }
+  if (shake.dir === 0) {                                               // 첫 방향: 처음 자리에서 SHAKE_AMP 이상 움직이면 정해진다
+    if (Math.abs(x - shake.ext) > SHAKE_AMP) { shake.dir = Math.sign(x - shake.ext); shake.ext = x; }
+  } else if (shake.dir * (x - shake.ext) > 0) shake.ext = x;          // 같은 방향으로 더 감: 끝점 갱신
+  else if (Math.abs(x - shake.ext) > SHAKE_AMP) {                     // 끝점에서 충분히 되돌아옴 = 방향 바꿈
+    if (now > shake.coolUntil) shake.revs.push(now);                 // 막 발동한 뒤 쉬는 동안의 꺾임은 세지 않는다
+    shake.lastRev = now;
+    shake.dir = -shake.dir; shake.ext = x;
+  }
+  shake.revs = shake.revs.filter(t => now - t < SHAKE_WIN);
+  dbg.mode = `주먹 흔들기 ${shake.revs.length}/${SHAKE_REV}`;
+  if (shake.revs.length >= SHAKE_REV && now > shake.coolUntil) {
+    shake.revs = []; shake.coolUntil = now + SHAKE_COOL;
+    return true;
+  }
+  return false;
+}
+
+/* ───────── 부품 보기: 커서로 가리켜 잠깐 머물면(DWELL) 그 부품만 보고, 빈 곳에 머물면 전체로 ───────── */
+const DWELL = 700, DWELL_EMPTY = 1000;
+const pointer = { on: false, x: 0.5, y: 0.5, target: null, since: 0 };
+const cursorEl = document.getElementById('cursor');
+const ringEl = cursorEl.querySelector('circle.prog');
+const pickRay = new THREE.Raycaster(), ndc = new THREE.Vector2();
+function pickAt(x, y) {                                   // 화면 비율 좌표 → 부품 (없으면 null)
+  if (!cur) return null;
+  ndc.set(x * 2 - 1, -(y * 2 - 1));
+  pickRay.setFromCamera(ndc, camera);
+  const hit = pickRay.intersectObjects(cur.meshes, false)[0];
+  return hit ? cur.meshOwner.get(hit.object) : null;
+}
+function moveHandPointer(x, y) {
+  x = Math.min(1, Math.max(0, x)); y = Math.min(1, Math.max(0, y));
+  if (!pointer.on) { pointer.x = x; pointer.y = y; }
+  pointer.x += (x - pointer.x) * 0.4; pointer.y += (y - pointer.y) * 0.4;   // 떨림 줄이기
+  pointer.on = true;
+}
+function updatePointer(now) {
+  cursorEl.classList.toggle('on', pointer.on);
+  if (!pointer.on) { pointer.target = undefined; if (!mouseHover) view.hover = null; return; }
+  cursorEl.style.left = `${pointer.x * innerWidth}px`;
+  cursorEl.style.top = `${pointer.y * innerHeight}px`;
+  const t = pickAt(pointer.x, pointer.y);
+  view.hover = t;
+  if (t !== pointer.target) { pointer.target = t; pointer.since = now; }
+  const need = t ? DWELL : DWELL_EMPTY;
+  // 이미 그 상태면 머물 필요 없음. 부품 보기 중에는 커서가 칩 이름표 보기용이라 머물러도 다른 부품으로 안 바뀐다
+  // (나가기: 주먹 0.5초 · Esc · 빈 곳 클릭)
+  const done = !!view.part || (t && t === view.part) || (!t && !view.part);
+  const prog = done ? 0 : Math.min(1, (now - pointer.since) / need);
+  ringEl.style.strokeDashoffset = `${100 - prog * 100}`;
+  if (prog >= 1) { t ? focus(t) : unfocus(); pointer.since = now; }
+}
+function focus(part) {
+  if (!part) return unfocus();
+  view.part = view.shown = part;
+  anchorAt = 0;
+}
+function unfocus() { view.part = null; anchorAt = 0; }
+
+// 흐리게(부품 보기)·강조(커서가 올라간 부품). 재질 투명 전환은 바뀔 때만 한다
+const HOVER = new THREE.Color(0xC8D66A);
+const shadeC = new THREE.Vector3(), focusCenter = new THREE.Vector3();
+function shadeParts(k) {
+  // 부품 보기: 나머지는 흐리게. 단 보고 있는 부품보다 카메라에 가까운 부품은 화면을 가리는 막이 되니 아예 숨긴다
+  let focusDist = Infinity;
+  if (view.part) { box.setFromObject(view.part.obj).getCenter(focusCenter); focusDist = focusCenter.distanceTo(camera.position); }
+  else if (sim.on && sim.lit.size) {                  // 작동 보기: 빛나는 부품들 중심
+    simBox.makeEmpty(); for (const p of sim.lit) simBox.expandByObject(p.obj);
+    focusDist = simBox.getCenter(focusCenter).distanceTo(camera.position);
+  }
+  for (const part of cur.parts) {
+    let opT = 1;
+    if (sim.on) {                                    // 작동 보기: 투시, 지금 단계 부품만 또렷하게. 앞을 가리는 껍데기는 더 옅게
+      opT = sim.hide.has(part) ? 0 : sim.lit.has(part) ? 1 : 0.14;
+      if (opT === 0.14 && box.setFromObject(part.obj).getCenter(shadeC).distanceTo(camera.position) < focusDist * 0.92) opT = 0.035;
+    }
+    else if (view.part && part !== view.part) {
+      box.setFromObject(part.obj).getCenter(shadeC);
+      opT = shadeC.distanceTo(camera.position) < focusDist ? 0 : 0.07;
+    }
+    const hiT = sim.on ? (sim.lit.has(part) ? 0.12 + 0.08 * Math.sin(performance.now() / 180) : 0)
+                       : part === view.hover && part !== view.part ? 0.28 : 0;
+    part.op = (part.op ?? 1) + (opT - (part.op ?? 1)) * k;
+    part.hi = (part.hi ?? 0) + (hiT - (part.hi ?? 0)) * k;
+    if (Math.abs(part.op - opT) < 0.003) part.op = opT;
+    part.obj.visible = part.op > 0.005;
+    if (Math.abs(part.hi - hiT) < 0.003) part.hi = hiT;
+    part.obj.traverse(o => {
+      if (!o.isMesh) return;
+      const m = o.material, u = m.userData;
+      const fade = part.op < 0.999;
+      if (m.transparent !== (fade || u.baseTransparent)) { m.transparent = fade || u.baseTransparent; m.needsUpdate = true; }
+      m.opacity = u.baseOp * part.op;
+      m.depthWrite = !fade;
+      if (m.emissive) m.emissive.copy(HOVER).multiplyScalar(part.hi);
+    });
+  }
+}
+
+const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+function drawOverlay(L) {
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  octx.lineWidth = 3; octx.strokeStyle = '#C8D66A'; octx.fillStyle = '#fff';
+  for (const lm of L) {
+    for (const [i, j] of BONES) {
+      octx.beginPath();
+      octx.moveTo(lm[i].x * overlay.width, lm[i].y * overlay.height);
+      octx.lineTo(lm[j].x * overlay.width, lm[j].y * overlay.height);
+      octx.stroke();
+    }
+  }
+}
+
+
+/* ───────── 마우스·키보드 (카메라 없을 때, 시험할 때) ───────── */
+let drag = null, mouseHover = false;
+addEventListener('pointerdown', e => (drag = { x: e.clientX, y: e.clientY, yaw: state.yawT, pitch: state.pitchT }));
+addEventListener('pointerup', e => {
+  if (drag && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 5) focus(pickAt(e.clientX / innerWidth, e.clientY / innerHeight));
+  drag = null;
+});
+addEventListener('pointermove', e => {
+  if (!drag) {                                         // 마우스를 올린 부품 강조
+    if (pointer.on) return;
+    view.hover = pickAt(e.clientX / innerWidth, e.clientY / innerHeight);
+    mouseHover = !!view.hover;
+    return;
+  }
+  state.auto = false;
+  state.yawT = drag.yaw + (e.clientX - drag.x) / innerWidth * 3;
+  state.pitchT = Math.max(-0.9, Math.min(0.9, drag.pitch + (e.clientY - drag.y) / innerHeight * 2));
+});
+addEventListener('wheel', e => {
+  state.auto = false;
+  if (e.ctrlKey) {                                     // 트랙패드 핀치(맥은 ctrl+휠로 온다) = 확대·축소
+    view.userT = Math.min(USER_MAX, Math.max(USER_MIN, view.userT * Math.exp(e.deltaY * 0.01)));
+    return;
+  }
+  state.fTarget = Math.min(1, Math.max(0, state.fTarget + e.deltaY * 0.0015));
+}, { passive: true });
+addEventListener('keydown', e => {
+  const i = ORDER.indexOf(cur?.meta.code);
+  if (e.key >= '1' && e.key <= String(ORDER.length)) show(ORDER[+e.key - 1]);
+  else if (e.key === 'ArrowRight') show(ORDER[(i + 1) % ORDER.length]);
+  else if (e.key === 'ArrowLeft') show(ORDER[(i + ORDER.length - 1) % ORDER.length]);
+  else if (e.key === 'l' || e.key === 'L') state.labels = !state.labels;
+  else if (e.key === 'c' || e.key === 'C') document.getElementById('cam').classList.toggle('off');
+  else if (e.key === 'h' || e.key === 'H') document.body.classList.toggle('clean');
+  else if (e.key === ' ') state.auto = !state.auto;
+  else if (e.key === 'Escape') sim.on ? simStop() : unfocus();
+  else if (e.key === 's' || e.key === 'S') sim.on ? simStop() : simStart();
+  else if (e.key === '+' || e.key === '=') view.userT = Math.max(USER_MIN, view.userT / 1.25);
+  else if (e.key === '-' || e.key === '_') view.userT = Math.min(USER_MAX, view.userT * 1.25);
+  else if (e.key === '0') view.userT = 1;
+});
+addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight, false); if (cur) frameCamera(); });
+
+// 화면 맞춤에 쓰는 부품: 멀리 날아가 화면 밖으로 빠지는 연출용 부품(sb300 발사 튜브)은 뺀다
+function fitParts(p) {
+  if (p.fit) return p.fit;
+  const ds = p.parts.map(x => x.dist).filter(d => d > 0).sort((a, b) => a - b);
+  const med = ds[ds.length >> 1] || 0;
+  return (p.fit = p.parts.filter(x => x.dist <= med * 3));
+}
+const corner = new THREE.Vector3();
+function fitCamera(k) {
+  holder.updateMatrixWorld(true);
+  let m = 0;
+  for (const part of fitParts(cur)) {
+    for (const s of part.samples) {
+      corner.copy(s).applyMatrix4(part.obj.matrixWorld).project(camera);
+      if (corner.z > 1) continue;                      // 카메라 뒤 (많이 확대했을 때)
+      m = Math.max(m, Math.abs(corner.x) / FIT.side, corner.y > 0 ? corner.y / FIT.top : -corner.y / FIT.bottom);
+    }
+  }
+  // 투영 크기는 거리에 반비례하니, 지금 거리 배율(zoom × user)에서 잰 m 으로 맞춤 배율을 구한다.
+  // 부품 보기 중에는 맞춤을 멈춘다(부품 하나에 다가가 있으니)
+  if (view.focus < 0.01 && !sim.on) {                // 작동 보기 중엔 화면 맞춤도 멈춘다 (보던 화면 고정)
+    const want = Math.max(1, zoom * view.user * m);
+    zoom += (want - zoom) * Math.min(1, k * 0.6);
+  }
+  placeCamera();
+}
+
+/* ───────── 작동 보기 (시뮬레이션) ─────────
+   조립된 채 겉을 반투명(투시)으로 두고, 단계마다 관련 부품을 빛내고 신호 흐름(빛나는 점)과 움직임을 보여 준다.
+   단계 = { text, lit: [부품 이름…], flow: [[보내는 쪽, 받는 쪽], …], f, deploy, hide, act: [동작…], ms }
+     flow 의 이름 대신 'SKY'(바깥 먼 곳 — 무전·위성) 나 'FRONT'(제품 앞쪽 바깥 — 들어오는 빛) 를 쓸 수 있다.
+     act: { slide: 이름, dir: [x,y,z](Blender 축), dist, back: true(갔다 옴) | from: true(밀려났다 돌아옴) }
+          { spin: [이름…], axis: [x,y,z], rps }       — 계속 돌리기(프로펠러·모터)
+          { shot: 이름, dir: [x,y,z], text: '탕!' }    — 이름 부품의 dir 쪽 끝에서 탄이 날아가고 섬광·흔들림
+          { flash: 이름, color }                       — 부품 자리에서 번쩍 (LED·형광·충돌)
+          { shake: 이름, amp }                         — 부품을 잘게 떨기 (진동)
+   작동 원리는 교육용 개념 흐름이다. 실제 제품의 설계·수치가 아니다. */
+const SCEN = {
+  k2c1: { title: '한 발 쏘기', steps: [
+    { text: '조준: 전지 전기를 받은 회로가 LED 를 켜고, 반사 렌즈에 비친 빨간 점이 표적 위에 겹쳐 보인다 (일반적인 도트사이트 원리)',
+      lit: ['전지', '밝기 조절 회로 기판', 'LED 발광부', '반사 렌즈'],
+      flow: [['전지', '밝기 조절 회로 기판'], ['밝기 조절 회로 기판', 'LED 발광부'], ['LED 발광부', '반사 렌즈']],
+      act: [{ flash: 'LED 발광부', color: 0xff3b30 }] },
+    { text: '조정간을 단발에 두고 방아쇠를 당긴다 — 풀려난 공이치기가 노리쇠 속 공이를 때리고, 공이가 약실 속 탄의 뇌관을 친다',
+      lit: ['방아쇠 뭉치', '노리쇠 뭉치'], flow: [['방아쇠 뭉치', '노리쇠 뭉치']] },
+    { text: '화약이 타며 생긴 가스가 탄두를 총열 속 강선을 따라 밀어내고, 회전하며 총구를 떠난 탄두가 날아간다',
+      lit: ['총열·총열덮개', '노리쇠 뭉치'], act: [{ shot: '총열·총열덮개', from: '노리쇠 뭉치', dir: [1, 0, 0], text: '탕!' }], ms: 3200 },
+    { text: '총열 중간의 가스 구멍으로 빠져나온 가스 일부가 긴 가스 피스톤을 뒤로 민다 (롱 스트로크 가스 피스톤 방식)',
+      lit: ['총열·총열덮개', '가스 피스톤·조절기'], flow: [['총열·총열덮개', '가스 피스톤·조절기']],
+      act: [{ slide: '가스 피스톤·조절기', dir: [-1, 0, 0], dist: 0.02, back: true }] },
+    { text: '피스톤과 함께 노리쇠 뭉치가 뒤로 물러나며 노리쇠가 돌아 풀리고, 빈 탄피를 밖으로 튕겨 내며 복좌 스프링이 눌린다',
+      lit: ['노리쇠 뭉치', '가스 피스톤·조절기', '복좌 스프링·가이드'],        // 롱 스트로크: 피스톤이 노리쇠 뭉치와 함께 움직인다
+      act: [{ slide: '노리쇠 뭉치', dir: [-1, 0, 0], dist: 0.07 }, { slide: '가스 피스톤·조절기', dir: [-1, 0, 0], dist: 0.07 },
+            { eject: '노리쇠 뭉치', dir: [0.2, -1, 0.9], delay: 700 }] },
+    { text: '눌린 복좌 스프링이 노리쇠 뭉치를 다시 앞으로 밀고, 탄창 스프링이 올려 준 다음 탄을 밀어 약실에 넣은 뒤 노리쇠가 돌아 잠긴다',
+      lit: ['복좌 스프링·가이드', '노리쇠 뭉치', '탄창 스프링', '탄창판'],
+      flow: [['탄창 스프링', '노리쇠 뭉치']],
+      act: [{ slide: '노리쇠 뭉치', dir: [-1, 0, 0], dist: 0.07, from: true }, { slide: '가스 피스톤·조절기', dir: [-1, 0, 0], dist: 0.07, from: true }] },
+  ] },
+  sb300: { title: '발사부터 목표까지', steps: [
+    { text: '발사관 안에서 날개·꼬리·프로펠러를 접은 채 대기한다. 발사하면 공압(압축 공기)이 기체를 관 밖으로 밀어낸다',
+      lit: ['발사 튜브'], deploy: 0 },
+    { text: '관을 빠져나오자마자 접혀 있던 날개·꼬리·프로펠러가 스프링 힘으로 펴진다',
+      lit: ['날개 전개 장치', '주날개(좌)', '주날개(우)', '꼬리날개(좌)', '꼬리날개(우)'], hide: ['발사 튜브'], deploy: 'open' },
+    { text: '리튬이온 배터리 전기가 모터 구동기를 거쳐 전기 모터를 돌리고, 꼬리의 프로펠러가 기체를 앞으로 민다',
+      lit: ['리튬 배터리 팩', '모터 구동기(ESC)', '모터 블록', '프로펠러'], hide: ['발사 튜브'], deploy: 1,
+      flow: [['리튬 배터리 팩', '모터 구동기(ESC)'], ['모터 구동기(ESC)', '모터 블록']],
+      act: [{ spin: ['프로펠러'], axis: [1, 0, 0], rps: 6 }] },
+    { text: '비행제어 컴퓨터가 GPS 와 자세 센서로 위치·자세를 계산해 모터와 조종면을 움직인다',
+      lit: ['비행제어 컴퓨터'], hide: ['발사 튜브'], deploy: 1,
+      flow: [['비행제어 컴퓨터', '모터 구동기(ESC)'], ['비행제어 컴퓨터', '꼬리날개(좌)'], ['비행제어 컴퓨터', '꼬리날개(우)']],
+      act: [{ spin: ['프로펠러'], axis: [1, 0, 0], rps: 6 }] },
+    { text: '주간(EO)·열상(IR) 카메라의 실시간 영상을, 주파수를 바꿔 가며 암호화하는 디지털 데이터링크로 조종자 태블릿에 보낸다',
+      lit: ['주간(EO) 카메라', '열상(IR) 센서', '영상처리 보드', '데이터링크 무전 모듈'], hide: ['발사 튜브'], deploy: 1,
+      flow: [['주간(EO) 카메라', '영상처리 보드'], ['열상(IR) 센서', '영상처리 보드'], ['영상처리 보드', '데이터링크 무전 모듈'], ['데이터링크 무전 모듈', 'SKY']],
+      act: [{ spin: ['프로펠러'], axis: [1, 0, 0], rps: 6 }] },
+    { text: '조종자가 태블릿 화면에서 목표를 누르면(Tap-to-Target) 명령이 무전으로 돌아오고, 목표 추적 기능이 목표를 따라가며 방향을 튼다',
+      lit: ['데이터링크 무전 모듈', '비행제어 컴퓨터'], hide: ['발사 튜브'], deploy: 1,
+      flow: [['SKY', '데이터링크 무전 모듈'], ['데이터링크 무전 모듈', '비행제어 컴퓨터']],
+      act: [{ spin: ['프로펠러'], axis: [1, 0, 0], rps: 6 }] },
+    { text: '조종자는 마지막 몇 초 전까지 공격을 취소(웨이브오프)했다가 다시 노릴 수 있다. 공격을 확정하면 조종자가 고른 방식으로 목표에서 탄두가 작동한다',
+      lit: ['데이터링크 무전 모듈', '비행제어 컴퓨터', '탄두'], hide: ['발사 튜브'], deploy: 1,
+      flow: [['SKY', '데이터링크 무전 모듈'], ['데이터링크 무전 모듈', '비행제어 컴퓨터'], ['비행제어 컴퓨터', '탄두']],
+      act: [{ flash: '탄두', color: 0xffb030, delay: 1400 }] },
+  ] },
+  quad: { title: '정찰 비행', steps: [
+    { text: '배터리 셀(예: 3개, 약 11V)의 전기가 배전 기판으로 들어가, 각 보드가 쓰는 전압으로 나뉜다',
+      lit: ['배터리 셀(3S)', '배전 기판'], flow: [['배터리 셀(3S)', '배전 기판']] },
+    { text: '비행 컨트롤러가 IMU 로 기울기·회전을 1초에 수백~수천 번, 기압계로 높이를 재서 자세를 계산한다',
+      lit: ['배전 기판', '비행 컨트롤러'], flow: [['배전 기판', '비행 컨트롤러']] },
+    { text: '명령을 받은 4-in-1 ESC 가 모터 코일에 전류를 번갈아 흘려 모터 네 개를 돌린다',
+      lit: ['비행 컨트롤러', '4-in-1 ESC(모터 구동 보드)', '모터 코일(앞 오른쪽)', '모터 로터(앞 오른쪽)', '모터(앞 왼쪽)', '모터(뒤 왼쪽)', '모터(뒤 오른쪽)'],
+      flow: [['비행 컨트롤러', '4-in-1 ESC(모터 구동 보드)'], ['4-in-1 ESC(모터 구동 보드)', '모터 코일(앞 오른쪽)'], ['4-in-1 ESC(모터 구동 보드)', '모터(앞 왼쪽)'],
+             ['4-in-1 ESC(모터 구동 보드)', '모터(뒤 왼쪽)'], ['4-in-1 ESC(모터 구동 보드)', '모터(뒤 오른쪽)']],
+      act: [{ spin: ['프로펠러(앞 왼쪽)', '프로펠러(앞 오른쪽)', '프로펠러(뒤 왼쪽)', '프로펠러(뒤 오른쪽)', '모터 로터(앞 오른쪽)'], axis: [0, 0, 1], rps: 5 }] },
+    { text: 'GPS·나침반 모듈은 위치와 방향을 비행 컨트롤러로, 항법 카메라는 장애물까지 거리를 자율비행 컴퓨터로 보낸다',
+      lit: ['GPS·나침반 모듈', '비행 컨트롤러', '항법 카메라 쌍', '자율비행 컴퓨터'],
+      flow: [['SKY', 'GPS·나침반 모듈'], ['GPS·나침반 모듈', '비행 컨트롤러'], ['항법 카메라 쌍', '자율비행 컴퓨터']],
+      act: [{ spin: ['프로펠러(앞 왼쪽)', '프로펠러(앞 오른쪽)', '프로펠러(뒤 왼쪽)', '프로펠러(뒤 오른쪽)'], axis: [0, 0, 1], rps: 5 }] },
+    { text: '자율비행 컴퓨터가 주변을 3D 로 그려 안전한 경로를 짜고, 비행 컨트롤러에 갈 방향을 준다',
+      lit: ['자율비행 컴퓨터', '비행 컨트롤러'], flow: [['자율비행 컴퓨터', '비행 컨트롤러']],
+      act: [{ spin: ['프로펠러(앞 왼쪽)', '프로펠러(앞 오른쪽)', '프로펠러(뒤 왼쪽)', '프로펠러(뒤 오른쪽)'], axis: [0, 0, 1], rps: 5 }] },
+    { text: '짐벌이 흔들림을 상쇄해 카메라를 수평으로 붙잡고, 렌즈군·이미지 센서·열상 코어가 영상을 만든다',
+      lit: ['짐벌(3축 모터)', '렌즈군', '이미지 센서 보드', '열상 코어'],
+      flow: [['FRONT', '렌즈군'], ['렌즈군', '이미지 센서 보드']],
+      act: [{ spin: ['프로펠러(앞 왼쪽)', '프로펠러(앞 오른쪽)', '프로펠러(뒤 왼쪽)', '프로펠러(뒤 오른쪽)'], axis: [0, 0, 1], rps: 5 }] },
+    { text: '영상은 데이터링크 무전 모듈을 통해 조종기로 실시간 전송된다 — 군용은 보통 암호화한다',
+      lit: ['이미지 센서 보드', '자율비행 컴퓨터', '데이터링크 무전 모듈'],
+      flow: [['이미지 센서 보드', '자율비행 컴퓨터'], ['자율비행 컴퓨터', '데이터링크 무전 모듈'], ['데이터링크 무전 모듈', 'SKY']],
+      act: [{ spin: ['프로펠러(앞 왼쪽)', '프로펠러(앞 오른쪽)', '프로펠러(뒤 왼쪽)', '프로펠러(뒤 오른쪽)'], axis: [0, 0, 1], rps: 5 }] },
+  ] },
+  nvg: { title: '어둠 속에서 보는 원리', steps: [
+    { text: '스위치를 ON 으로 돌리면 건전지(AA 2개 = 3V, 또는 3V 리튬 1개)의 전기가 제어 회로 기판으로 들어간다',
+      lit: ['건전지', '제어 회로 기판'], flow: [['건전지', '제어 회로 기판']] },
+    { text: '고전압 전원 모듈이 3V 를 수천 볼트(형광 스크린 쪽은 약 6,000V)로 올려 증폭관에 건다',
+      lit: ['제어 회로 기판', '고전압 전원 모듈', '증폭관 외통'], flow: [['제어 회로 기판', '고전압 전원 모듈'], ['고전압 전원 모듈', '증폭관 외통']] },
+    { text: '희미한 별빛·달빛이 대물렌즈를 지나 광음극 위에 상을 맺는다 — 이때 상은 위아래가 뒤집혀 있다',
+      lit: ['대물렌즈(앞)', '대물렌즈(가운데)', '대물렌즈(뒤)', '광음극'],
+      flow: [['FRONT', '대물렌즈(앞)'], ['대물렌즈(앞)', '대물렌즈(가운데)'], ['대물렌즈(가운데)', '대물렌즈(뒤)'], ['대물렌즈(뒤)', '광음극']] },
+    { text: '광음극이 빛을 전자로 바꾸고, 마이크로채널판(MCP)의 가는 구멍 속에서 전자가 수천 배로 불어난다',
+      lit: ['광음극', '마이크로채널판(MCP)'], flow: [['광음극', '마이크로채널판(MCP)']] },
+    { text: '불어난 전자가 형광 스크린을 때리면 빛이 난다 — PVS-7 관은 초록 형광체(P-43)라 화면이 초록이다',
+      lit: ['마이크로채널판(MCP)', '형광 스크린'], flow: [['마이크로채널판(MCP)', '형광 스크린']],
+      act: [{ flash: '형광 스크린', color: 0x5dff6a }] },
+    { text: '초록 영상은 광섬유 출력창을 지나 관 밖으로 나오고, 콜리메이터(릴레이 렌즈·프리즘)가 뒤집힌 상을 바로 세워 두 접안렌즈로 나눠 보낸다',
+      lit: ['광섬유 출력창', '프리즘·콜리메이터', '접안렌즈(좌)', '접안렌즈(우)'],
+      flow: [['형광 스크린', '광섬유 출력창'], ['광섬유 출력창', '프리즘·콜리메이터'], ['프리즘·콜리메이터', '접안렌즈(좌)'], ['프리즘·콜리메이터', '접안렌즈(우)']] },
+    { text: '아주 어두우면 스위치를 IR 로 돌려 적외선 LED 로 가까운 곳을 비춘다 — 사람 눈엔 안 보이지만 상대의 야간투시경에는 보이고, 왼쪽 접안부에 빨간 표시등이 켜진다',
+      lit: ['제어 회로 기판', '적외선 조명 LED'], flow: [['제어 회로 기판', '적외선 조명 LED'], ['적외선 조명 LED', 'FRONT']],
+      act: [{ flash: '적외선 조명 LED', color: 0xb04dff }] },
+  ] },
+  ugs: { title: '침입 감지와 경보', steps: [
+    { text: '낮 동안 태양전지 패널의 전기가 태양광 충전 기판을 거쳐 배터리를 채운다',
+      lit: ['태양전지 패널', '태양광 충전 기판', '배터리 팩(충전식 리튬)'],
+      flow: [['SKY', '태양전지 패널'], ['태양전지 패널', '태양광 충전 기판'], ['태양광 충전 기판', '배터리 팩(충전식 리튬)']] },
+    { text: '평소 메인 제어 보드는 저전력 대기 상태로 전기를 아끼며 센서 신호를 기다린다',
+      lit: ['메인 제어 보드'] },
+    { text: '사람·차량이 지나가면 땅의 떨림이 말뚝을 타고 지오폰에 전해지고, 흔들린 코일이 전기 신호를 만든다',
+      lit: ['지면 말뚝', '지진동 센서 케이스', '지오폰(진동 감지 코일)'], flow: [['지면 말뚝', '지오폰(진동 감지 코일)']],
+      act: [{ shake: '지오폰(진동 감지 코일)', amp: 0.0015 }, { shake: '지면 말뚝', amp: 0.0008 }] },
+    { text: '적외선(PIR) 감지기는 몸의 열을, 음향 마이크는 발소리·엔진 소리를 잡는다. 여러 센서를 함께 쓰면 오경보를 줄일 수 있다',
+      lit: ['적외선(PIR) 감지기', '음향 마이크'] },
+    { text: '메인 제어 보드가 신호를 합쳐 사람인지 차량인지 가려내고, GPS 로 알아 둔 센서 위치를 함께 보낸다',
+      lit: ['메인 제어 보드', 'GPS 모듈', '지오폰(진동 감지 코일)', '적외선(PIR) 감지기', '음향 마이크'],
+      flow: [['지오폰(진동 감지 코일)', '메인 제어 보드'], ['적외선(PIR) 감지기', '메인 제어 보드'], ['음향 마이크', '메인 제어 보드'], ['GPS 모듈', '메인 제어 보드']] },
+    { text: '무선 통신 모듈(메시)이 안테나로 옆 센서를 징검다리 삼아 기지국까지 경보를 보낸다',
+      lit: ['메인 제어 보드', '무선 통신 모듈(메시)', '안테나'],
+      flow: [['메인 제어 보드', '무선 통신 모듈(메시)'], ['무선 통신 모듈(메시)', '안테나'], ['안테나', 'SKY']] },
+  ] },
+};
+const STEP_MS = 3600;
+const sim = { on: false, i: 0, t0: 0, playing: true, lit: new Set(), hide: new Set(), deploy: null, fx: [], flows: [] };
+const simEl = document.getElementById('sim'), simBtn = document.getElementById('simBtn'), bangEl = document.getElementById('bang');
+const partByLabel = (label) => {
+  const p = cur.parts.find(x => x.label === label);
+  if (!p && label !== 'SKY' && label !== 'FRONT') console.warn('작동 보기: 부품 없음 —', label);
+  return p;
+};
+const fxGroup = new THREE.Group();
+scene.add(fxGroup);
+const dotGeo = new THREE.SphereGeometry(1, 12, 8);
+
+function simStart() {
+  if (!SCEN[cur.meta.code]) { say('이 제품은 작동 보기가 아직 없습니다', 2500); return; }
+  unfocus();
+  sim.prevF = state.fTarget;                         // 끄면 원래 분해 상태로 돌아간다
+  sim.on = true; sim.playing = true;
+  document.body.classList.add('simming');
+  const bar = simEl.querySelector('.bar');
+  bar.innerHTML = SCEN[cur.meta.code].steps.map(() => '<i><b></b></i>').join('');
+  simGo(0);
+}
+function simStop() {
+  sim.on = false; sim.lit.clear(); sim.hide.clear(); sim.deploy = null;
+  clearFx();
+  document.body.classList.remove('simming');
+  state.fTarget = sim.prevF ?? 0;
+}
+function clearFx() {
+  for (const o of [...fxGroup.children]) { fxGroup.remove(o); o.geometry !== dotGeo && o.geometry?.dispose?.(); o.material?.dispose?.(); }
+  sim.flows = []; sim.fx = [];
+}
+function simGo(i) {
+  const sc = SCEN[cur.meta.code], n = sc.steps.length;
+  if (i >= n) { sim.playing = false; i = n - 1; }
+  sim.i = Math.max(0, i);
+  const st = sc.steps[sim.i];
+  sim.t0 = performance.now();
+  sim.lit = new Set((st.lit || []).map(partByLabel).filter(Boolean));
+  sim.hide = new Set((st.hide || []).map(partByLabel).filter(Boolean));
+  sim.deployMode = st.deploy ?? null;
+  state.fTarget = st.f ?? 0;
+  anchorAt = 0;
+  clearFx();
+  for (const [a, b] of st.flow || []) {
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineBasicMaterial({ color: 0xC8D66A, transparent: true, opacity: 0.45, depthTest: false }));
+    line.renderOrder = 10;
+    const dots = [0, 1, 2].map(() => {
+      const m = new THREE.Mesh(dotGeo, new THREE.MeshBasicMaterial({ color: 0xE9F59A, transparent: true, depthTest: false }));
+      m.renderOrder = 11; fxGroup.add(m); return m;
+    });
+    fxGroup.add(line);
+    sim.flows.push({ a: a === 'SKY' || a === 'FRONT' ? a : partByLabel(a), b: b === 'SKY' || b === 'FRONT' ? b : partByLabel(b), line, dots });
+  }
+  sim.acts = (st.act || []).map(a => ({ ...a, done: false }));
+  simEl.querySelector('.ttl').textContent = `작동 보기 · ${sc.title}`;
+  simEl.querySelector('.cnt').textContent = `${sim.i + 1} / ${n}`;
+  simEl.querySelector('.txt').textContent = st.text;
+  simEl.querySelector('[data-a=play]').textContent = sim.playing ? '⏸ 멈춤' : '▶ 재생';
+  simEl.querySelectorAll('.bar b').forEach((b, k) => (b.style.width = k < sim.i ? '100%' : '0%'));
+}
+simBtn.addEventListener('click', e => { e.stopPropagation(); simStart(); });
+for (const el of [simBtn, simEl]) {
+  el.addEventListener('pointerdown', e => e.stopPropagation());
+  el.addEventListener('pointerup', e => e.stopPropagation());
+}
+simEl.addEventListener('click', e => {
+  e.stopPropagation();
+  const a = e.target.closest('button')?.dataset.a;
+  if (a === 'prev') simGo(sim.i - 1);
+  else if (a === 'next') simGo(sim.i + 1);
+  else if (a === 'close') simStop();
+  else if (a === 'play' && sim.restart) { sim.restart = false; sim.playing = true; simGo(0); }
+  else if (a === 'play') { sim.playing = !sim.playing; if (sim.playing) sim.t0 = performance.now() - sim.pausedAt; else sim.pausedAt = performance.now() - sim.t0;
+    simEl.querySelector('[data-a=play]').textContent = sim.playing ? '⏸ 멈춤' : '▶ 재생'; }
+});
+
+// 부품의 지금 월드 중심 / 제품 바깥의 가상 지점
+const wA = new THREE.Vector3(), wB = new THREE.Vector3(), wTmp = new THREE.Vector3();
+function simPoint(p, out, other) {
+  if (p === 'SKY' || p === 'FRONT') {
+    box.setFromObject(cur.group);
+    const size = box.getSize(wTmp).length();
+    if (p === 'SKY') return out.copy(other).add(new THREE.Vector3(0, size * 0.45, 0));
+    const fwd = new THREE.Vector3(1, 0, 0).applyQuaternion(holder.quaternion);     // Blender +X = 앞
+    return out.copy(other).addScaledVector(fwd, size * 0.45);
+  }
+  return box.setFromObject(p.obj).getCenter(out);
+}
+// 부품의 dir 쪽 맨 끝 (탄이 나가는 총구 등)
+function extremeAlong(part, dirWorld, out) {
+  let best = -Infinity;
+  for (const s of part.samples) {
+    wTmp.copy(s).applyMatrix4(part.obj.matrixWorld);
+    const d = wTmp.dot(dirWorld);
+    if (d > best) { best = d; out.copy(wTmp); }
+  }
+  return out;
+}
+
+let shakeUntil = 0;
+function burst(at, color, scale, life, now) {          // 번쩍 (섬광·LED·형광)
+  const size = box.setFromObject(cur.group).getSize(wTmp).length();
+  const m = new THREE.Mesh(dotGeo, new THREE.MeshBasicMaterial({ color, transparent: true, depthTest: false, blending: THREE.AdditiveBlending }));
+  m.position.copy(at); m.renderOrder = 12; fxGroup.add(m);
+  sim.fx.push({ o: m, t0: now, life, grow: size * scale });
+}
+function simUpdate(now) {
+  if (!sim.on) return;
+  const sc = SCEN[cur.meta.code];
+  const st = sc.steps[sim.i];
+  const ms = st.ms || STEP_MS;
+  const el = sim.playing ? now - sim.t0 : sim.pausedAt || 0;
+  const t = Math.min(1, el / ms);
+  const bars = simEl.querySelectorAll('.bar b');
+  if (bars[sim.i]) bars[sim.i].style.width = `${t * 100}%`;
+  // 날개 전개: 'open' 은 이 단계 동안 0 → 1
+  sim.deploy = sim.deployMode === 'open' ? smooth(0.1, 0.6, t) : sim.deployMode;
+  holder.updateMatrixWorld(true);
+  // 신호 흐름: 선 + 흘러가는 점 세 개
+  for (const f of sim.flows) {
+    if (!f.a || !f.b) continue;
+    const other = f.a === 'SKY' || f.a === 'FRONT' ? simPoint(f.b, wB, wB) : simPoint(f.a, wA, wA);
+    simPoint(f.a, wA, other); simPoint(f.b, wB, wA);
+    if (f.a === 'SKY' || f.a === 'FRONT') simPoint(f.a, wA, wB);
+    const pos = f.line.geometry.attributes.position;
+    pos.setXYZ(0, wA.x, wA.y, wA.z); pos.setXYZ(1, wB.x, wB.y, wB.z); pos.needsUpdate = true;
+    const r = wA.distanceTo(camera.position) * 0.006;
+    f.dots.forEach((d, k) => {
+      const u = ((el / 900) + k / 3) % 1;
+      d.position.lerpVectors(wA, wB, u);
+      d.scale.setScalar(r * (0.6 + 0.4 * Math.sin(u * Math.PI)));
+      d.material.opacity = Math.sin(u * Math.PI);
+    });
+  }
+  // 동작
+  for (const a of sim.acts) {
+    const delay = a.delay || 0;
+    if (el < delay) continue;
+    const ta = Math.min(1, (el - delay) / (ms * 0.7));
+    if (a.slide) {
+      const p = partByLabel(a.slide); if (!p) continue;
+      const amt = a.back ? Math.sin(Math.PI * ta) : a.from ? 1 - smooth(0.2, 0.8, ta) : smooth(0.1, 0.7, ta);
+      p.obj.position.addScaledVector(b2t(a.dir).normalize(), a.dist * amt);
+    } else if (a.spin) {
+      for (const lb of a.spin) {
+        const p = partByLabel(lb); if (!p) continue;
+        tmpQ.setFromAxisAngle(b2t(a.axis).normalize(), (now / 1000) * a.rps * Math.PI * 2);
+        p.obj.quaternion.multiply(tmpQ);
+      }
+    } else if (a.shake) {
+      const p = partByLabel(a.shake); if (!p) continue;
+      p.obj.position.x += Math.sin(now / 17) * a.amp; p.obj.position.z += Math.cos(now / 23) * a.amp;
+    } else if (a.flash && !a.done) {
+      a.done = true;
+      const p = partByLabel(a.flash); if (!p) continue;
+      const at = box.setFromObject(p.obj).getCenter(new THREE.Vector3());
+      burst(at, a.color || 0xffb347, 0.035, 500, now);
+    } else if (a.shot && !a.done) {
+      /* 탄두: 약실(from 부품의 앞끝)에서 생겨 투시된 총열 속을 지나(0.45초) 총구에서 섬광·"탕!"·흔들림,
+         그 뒤 빛 꼬리를 끌며 천천히 날아간다 */
+      a.done = true;
+      const barrel = partByLabel(a.shot); if (!barrel) continue;
+      const dirW = b2t(a.dir).normalize().applyQuaternion(holder.quaternion);
+      const muzzle = extremeAlong(barrel, dirW, new THREE.Vector3());
+      const start = a.from && partByLabel(a.from) ? extremeAlong(partByLabel(a.from), dirW, new THREE.Vector3())
+                                                  : muzzle.clone().addScaledVector(dirW, -0.25);
+      const size = box.setFromObject(cur.group).getSize(wTmp).length();
+      const bullet = new THREE.Group();
+      const brass = new THREE.MeshStandardMaterial({ color: 0xD9A441, metalness: 1, roughness: 0.25, emissive: 0x3a2400 });
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.0045, size * 0.0045, size * 0.022, 16), brass);
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(size * 0.0045, size * 0.012, 16), brass);
+      tip.position.y = size * 0.017;
+      bullet.add(body, tip);
+      bullet.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dirW);
+      bullet.traverse(o => { if (o.isMesh) { o.renderOrder = 13; o.material.depthTest = false; } });
+      fxGroup.add(bullet);
+      const trail = new THREE.Line(new THREE.BufferGeometry().setFromPoints([start, start]),
+        new THREE.LineBasicMaterial({ color: 0xFFD27A, transparent: true, opacity: 0.8, depthTest: false }));
+      trail.renderOrder = 12; fxGroup.add(trail);
+      const inside = 450, fly = 1600, speed = size * 0.9;          // 총열 통과 시간, 날아가는 시간, 속도(m/s)
+      let exited = false;
+      sim.fx.push({ o: bullet, t0: now, life: inside + fly, update: (el) => {
+        const pos = new THREE.Vector3();
+        if (el < inside) pos.lerpVectors(start, muzzle, smooth(0, 1, el / inside) * 0.5 + (el / inside) * 0.5);
+        else {
+          if (!exited) {
+            exited = true;
+            burst(muzzle, 0xffb347, 0.06, 450, performance.now());
+            shakeUntil = performance.now() + 380;
+            if (a.text) { bangEl.textContent = a.text; bangEl.classList.remove('go'); void bangEl.offsetWidth; bangEl.classList.add('go'); }
+          }
+          pos.copy(muzzle).addScaledVector(dirW, speed * (el - inside) / 1000);
+        }
+        bullet.position.copy(pos);
+        const tail = el < inside ? start : pos.clone().addScaledVector(dirW, -Math.min(speed * 0.35, pos.distanceTo(muzzle)));
+        trail.geometry.setFromPoints([tail, pos]);
+        trail.material.opacity = el < inside ? 0.35 : 0.8 * (1 - (el - inside) / fly);
+      } });
+      sim.fx.push({ o: trail, t0: now, life: inside + fly });
+    } else if (a.eject && !a.done) {
+      // 빈 탄피: 노리쇠 옆에서 옆·위로 튀어 돌며 떨어진다
+      a.done = true;
+      const bolt = partByLabel(a.eject); if (!bolt) continue;
+      const at = box.setFromObject(bolt.obj).getCenter(new THREE.Vector3());
+      const size = box.setFromObject(cur.group).getSize(wTmp).length();
+      const casing = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.005, size * 0.0055, size * 0.02, 14),
+        new THREE.MeshStandardMaterial({ color: 0xD9A441, metalness: 1, roughness: 0.3, emissive: 0x2a1a00 }));
+      casing.renderOrder = 13; casing.material.depthTest = false; fxGroup.add(casing);
+      const v0 = b2t(a.dir).normalize().applyQuaternion(holder.quaternion).multiplyScalar(size * 0.7);
+      const g = new THREE.Vector3(0, -size * 1.4, 0);
+      sim.fx.push({ o: casing, t0: now, life: 1300, update: (el) => {
+        const t = el / 1000;
+        casing.position.copy(at).addScaledVector(v0, t).addScaledVector(g, 0.5 * t * t);
+        casing.rotation.set(t * 14, t * 9, 0);
+      } });
+    }
+  }
+  for (const f of sim.fx) {
+    const el2 = now - f.t0, u = el2 / f.life;
+    f.o.visible = u >= 0 && u < 1;
+    if (!f.o.visible) continue;
+    if (f.update) f.update(el2);
+    if (f.grow) { f.o.scale.setScalar(f.grow * (0.3 + u)); f.o.material.opacity = 1 - u; }
+  }
+  if (sim.playing && el >= ms) {
+    if (sim.i + 1 < sc.steps.length) simGo(sim.i + 1);
+    else { sim.playing = false; sim.pausedAt = ms; simEl.querySelector('[data-a=play]').textContent = '↺ 처음부터'; sim.restart = true; }
+  }
+}
+
+/* ───────── 루프 ───────── */
+const right = new THREE.Vector3(), qYaw = new THREE.Quaternion(), qPitch = new THREE.Quaternion();
+const fillEl = document.getElementById('fill'), pctEl = document.getElementById('pct');
+let t0 = performance.now();
+function loop(now) {
+  requestAnimationFrame(loop);
+  readHands(now);
+  if (state.auto) {                                   // 자동 시연: 천천히 벌렸다 오므렸다
+    const t = (now - t0) / 1000;
+    state.fTarget = 0.5 - 0.5 * Math.cos(t * 0.9);
+    state.yawT = Math.sin(t * 0.35) * 0.6;
+  }
+  const k = TEST ? 1 : 0.1, kr = TEST ? 1 : 0.1;     // kr: 회전·확대 따라가기
+  const kf = TEST ? 1 : EXPLODE_FOLLOW;              // 분해는 천천히 펼쳐지게 (손을 확 펴도 ≈1초에 걸쳐)
+  state.f += (state.fTarget - state.f) * kf;
+  state.yaw += (state.yawT - state.yaw) * kr;
+  state.pitch += (state.pitchT - state.pitch) * kr;
+  view.user += (view.userT - view.user) * kr;
+  view.focus += ((view.part ? 1 : 0) - view.focus) * (TEST ? 1 : 0.08);
+  if (!view.part && view.focus < 0.001) view.shown = null;
+  if (cur) {
+    // 회전: 세계 위축으로 좌우, 카메라 오른쪽 축으로 위아래
+    right.setFromMatrixColumn(camera.matrixWorld, 0);
+    qYaw.setFromAxisAngle(Y, state.yaw);
+    qPitch.setFromAxisAngle(right, state.pitch);
+    holder.quaternion.copy(qPitch).multiply(qYaw);
+    applyExplode(cur, state.f);
+    simUpdate(now);
+    fitCamera(kr);
+    if (now < shakeUntil) camera.position.add(wTmp.set(Math.random() - 0.5, Math.random() - 0.5, 0).multiplyScalar(0.004));   // "탕!" 흔들림
+    shadeParts(TEST ? 1 : 0.15);
+    renderer.render(scene, camera);
+    placeLabels(now);
+    updatePointer(now);
+  }
+  fillEl.style.width = `${state.f * 100}%`;
+  pctEl.textContent = `${Math.round(state.f * 100)}%`;
+}
+
+// 시험용 손잡이
+window.APP = {
+  show, state, products,
+  set(f, yaw = 0, pitch = 0) { state.fTarget = state.f = f; state.yawT = state.yaw = yaw; state.pitchT = state.pitch = pitch; },
+  ready: false,
+  feed: applyHands, noHands, openness, isPointing, anchors: chooseAnchors, zoom: () => +zoom.toFixed(3),
+  view, pointer, focus, unfocus, pickAt, get code() { return cur?.meta.code; },
+  sim, simStart, simGo, simStop, SCEN,
+  labelOpacity() { return state.labels ? Math.max(smooth(0.35, 0.6, state.fTarget), view.part || pointer.on ? 1 : 0) : 0; },
+  focusLabel(label) { focus(cur.parts.find(p => p.label === label)); },
+};
+
+renderer.setSize(innerWidth, innerHeight, false);
+await show(ORDER[Math.max(0, ORDER.indexOf(params.get('p')))]);
+say('준비 중…');
+requestAnimationFrame(loop);
+window.APP.ready = true;
+if (params.has('nocam')) { document.getElementById('cam').classList.add('off'); say('마우스: 드래그 회전 · 휠 분해 · 클릭 부품 보기', 4000); }
+else startHands();
+</script>
+</body>
+</html>
