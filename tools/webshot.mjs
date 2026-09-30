@@ -20,7 +20,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = join(ROOT, 'out', 'web');
 const PORT = Number(process.env.PORT || 9433);   // 여러 개를 동시에 돌릴 때는 PORT 를 다르게
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const PAGE = pathToFileURL(join(ROOT, 'web', 'index.html')).href;
+const PAGE = process.env.URL || pathToFileURL(join(ROOT, 'web', 'index.html')).href;   // URL=https://… 이면 배포본 검사
 const [W, H] = (process.env.SIZE || '1600x900').split('x').map(Number);
 const FAKECAM = !!process.env.FAKECAM;
 const ALL = ['sb300', 'quad', 'nvg', 'ugs', 'k2c1'];
